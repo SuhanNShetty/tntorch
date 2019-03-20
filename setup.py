@@ -30,7 +30,6 @@ setup(
         'numpy',
         'scipy',
         'torch',
-	'maxvolpy'
     ],
     license="LGPL",
     zip_safe=False,
