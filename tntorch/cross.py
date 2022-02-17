@@ -1,4 +1,3 @@
-#TT-Cross
 import tntorch as tn
 import torch
 import sys
@@ -400,7 +399,7 @@ def cross(
             if _minimize:
                 print('| best: {:.8g}'.format(info['min']), end='')
             else:
-                print('| tt-error: {:.3e}, test-error:{:.3e}'.format(norm_eps,val_eps), end='')
+                print('| tt-error: {:.3e}, -error:{:.3e}'.format(norm_eps,val_eps), end='')
             print(' | time: {:8.4f} | largest rank: {:3d}'.format(time.time() - start, max(Rs)), end='')
             if converged:
                 print(' <- converged: eps < {}'.format(eps))
