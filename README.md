@@ -1,6 +1,6 @@
 [![Documentation Status](https://readthedocs.org/projects/tntorch/badge/?version=latest)](https://tntorch.readthedocs.io/en/latest/?badge=latest)
 
-# tntorch - Tensor Network Learning with PyTorch
+# tntorch - Tensor Network Learning with PyTorch (forked)
 
 **New**: our [Read the Docs site](http://tntorch.readthedocs.io/) is out!
 
