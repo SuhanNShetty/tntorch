@@ -1,6 +1,6 @@
 [![Documentation Status](https://readthedocs.org/projects/tntorch/badge/?version=latest)](https://tntorch.readthedocs.io/en/latest/?badge=latest)
 
-# tntorch - Tensor Network Learning with PyTorch (forked)
+# tntorch - Tensor Network Learning with PyTorch (forked for TTGO)
 
 **New**: our [Read the Docs site](http://tntorch.readthedocs.io/) is out!
 
@@ -99,7 +99,7 @@ Check out the [introductory notebook](https://github.com/rballester/tntorch/blob
 The main dependencies are *NumPy* and *PyTorch*. To download and install *tntorch*:
 
 ```
-git clone https://github.com/rballester/tntorch.git
+git clone https://github.com/SuhanNShetty/tntorch.git
 cd tntorch
 pip install .
 ```
@@ -112,9 +112,3 @@ We use [*pytest*](https://docs.pytest.org/en/latest/). Simply run:
 cd tests/
 pytest
 ```
-
-## Contributing
-
-Pull requests are welcome! 
-
-Besides using the [issue tracker](https://github.com/rballester/tntorch/issues), feel also free to contact me at <rballester@ifi.uzh.ch>.
