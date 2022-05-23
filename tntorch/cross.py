@@ -106,7 +106,6 @@ def cross(
     eps: float = 1e-6,
     max_iter: int = 25,
     min_iter: int =0,
-    val_size: int = 1000,
     verbose: bool = True,
     return_info: bool = False,
     record_samples: bool = False,
@@ -146,7 +145,6 @@ def cross(
     :param rmax: this rank will not be surpassed
     :param eps: the procedure will stop after this validation error is met (as measured after each iteration)
     :param max_iter: int
-    :param val_size: size of the validation set
     :param verbose: default is True
     :param return_info: if True, will also return a dictionary with informative metrics about the algorithm's outcome
     :param device: PyTorch device
@@ -248,26 +246,16 @@ def cross(
         return t_linterfaces, t_rinterfaces
     t_linterfaces, t_rinterfaces = init_interfaces()
 
-    # Create a validation set
-    Xs_val = [torch.as_tensor(np.random.choice(I, int(val_size))).to(device) for I in Is]
-    ys_val = f(*[t[Xs_val].torch() for t in tensors])
-    if ys_val.dim() > 1:
-        assert ys_val.dim() == 2
-        assert ys_val.shape[1] == 1
-        ys_val = ys_val[:, 0]
-
-    assert len(ys_val) == val_size
-    norm_ys_val = torch.norm(ys_val)
 
     if verbose:
         print('Cross-approximation over a {}D domain containing {:g} grid points:'.format(N, tensors[0].numel()))
+        print('Note: The algorithm converges as the ratio tt-new-norm/tt-old-norm settles to 1. For TTGO, the convergence is not important, just keep iterating as long as the ratio > 1')
     start = time.time()
     converged = False
 
     info = {
         'nsamples': 0,
         'eval_time': 0,
-        'val_epss': [],
         'min': 0,
         'argmin': None
     }
@@ -334,10 +322,11 @@ def cross(
             # QR + maxvol towards the right
             V = torch.reshape(V, [-1, V.shape[2]])  # Left unfolding
             Q, _ = torch.linalg.qr(V)
-            local, _ = maxvolpy.maxvol.maxvol(Q.detach().cpu().numpy(), max_iters=10000)
-
+            if _minimize:
+                local, _ = maxvolpy.maxvol.rect_maxvol(Q.detach().cpu().numpy(), maxK=Q.shape[1])
+            else:
+                local, _ = maxvolpy.maxvol.maxvol(Q.detach().cpu().numpy())
             V = torch.linalg.lstsq(Q[local, :].t(), Q.t()).solution.t()
-
             cores[j] = torch.reshape(V, [Rs[j], Is[j], Rs[j + 1]])
             left_locals.append(local)
 
@@ -359,7 +348,10 @@ def cross(
             # QR + maxvol towards the left
             V = torch.reshape(V, [Rs[j], -1])  # Right unfolding
             Q, _ = torch.linalg.qr(V.t())
-            local, _ = maxvolpy.maxvol.maxvol(Q.detach().cpu().numpy(),max_iters=10000)
+            if _minimize:
+                local, _ = maxvolpy.maxvol.rect_maxvol(Q.detach().cpu().numpy(), maxK=Q.shape[1])
+            else:
+                local, _ = maxvolpy.maxvol.maxvol(Q.detach().cpu().numpy())
             V = torch.linalg.lstsq(Q[local, :].t(), Q.t()).solution
             cores[j] = torch.reshape(torch.as_tensor(V), [Rs[j], Is[j], Rs[j+1]])
 
@@ -379,25 +371,19 @@ def cross(
 
 
         # Evaluate the change in TT model
-        norm_eps = (tn_old-tn.Tensor(cores)).norm()/(tn_old.norm()+1e-6)
+        norm_eps = (tn.Tensor(cores)).norm()/(tn_old.norm()+1e-9)
         tn_old = tn.Tensor(cores).clone()
 
 
 
-        # Evaluate validation error
-        val_eps = torch.norm(ys_val - tn.Tensor(cores)[Xs_val].torch()) / norm_ys_val
-        info['val_epss'].append(val_eps)
-
-
-
-        if norm_eps < eps and  i>min_iter:
+        if (norm_eps-1)**2 < eps and  i>min_iter:
             converged = True
 
         if verbose:  # Print status
             if _minimize:
                 print('| best: {:.8g}'.format(info['min']), end='')
             else:
-                print('| tt-error: {:.3e}, test-error:{:.3e}'.format(norm_eps,val_eps), end='')
+                print('| tt-new-norm/tt-old-norm: {:.3e}'.format(norm_eps), end='')
             print(' | time: {:8.4f} | largest rank: {:3d}'.format(time.time() - start, max(Rs)), end='')
             if converged:
                 print(' <- converged: eps < {}'.format(eps))
@@ -419,8 +405,6 @@ def cross(
             Rs = newRs
             t_linterfaces, t_rinterfaces = init_interfaces()  # Recompute interfaces
 
-    # if val_eps > eps and not _minimize and not suppress_warnings:
-    #     logging.warning('eps={:g} (larger than {}) when cross-approximating {}'.format(val_eps, eps, function))
 
     if verbose:
         print('Did {} function evaluations, which took {:.4g}s ({:.4g} evals/s)'.format(
@@ -434,7 +418,6 @@ def cross(
         info['Rs'] = Rs
         info['left_locals'] = left_locals
         info['total_time'] = time.time() - start
-        info['val_eps'] = val_eps
         return ret, info
     else:
         return ret

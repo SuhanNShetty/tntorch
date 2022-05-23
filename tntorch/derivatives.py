@@ -6,6 +6,8 @@ def partialset(t, order=1, mask=None, bounds=None):
     """
     Given a tensor, compute another one that contains all partial derivatives of certain order(s) and according to some optional mask.
 
+    This function does not use padding.
+
     :Examples:
 
     >>> t = tn.rand([10, 10, 10])  # A 3D tensor
@@ -22,21 +24,20 @@ def partialset(t, order=1, mask=None, bounds=None):
     :return: a :class:`Tensor`
     """
 
+    if t.batch:
+        raise ValueError('Batched tensors are not supproted.')
+
     if bounds is None:
-        bounds = [[0, sh-1] for sh in t.shape]
+        bounds = [[0, sh - 1] for sh in t.shape]
     if not hasattr(order, '__len__'):
         order = [order]
 
     max_order = max(order)
     def diff(core, n):
-        if core.dim() == 3:
-            pad = torch.zeros(core.shape[0], 1, core.shape[2])
-        else:
-            pad = torch.zeros(1, core.shape[1])
         if core.shape[1] == 1:
-            return pad
+            raise ValueError('Tensor size {} along dimension {} not enough to compute high-order derivative'.format(t.shape[n], n))
         step = (bounds[n][1] - bounds[n][0]) / (core.shape[-2] - 1)
-        return torch.cat(((core[..., 1:, :] - core[..., :-1, :]) / step, pad), dim=-2)
+        return (core[..., 1:, :] - core[..., :-1, :]) / step
     cores = []
     idxs = []
     for n in range(t.dim()):
@@ -45,9 +46,9 @@ def partialset(t, order=1, mask=None, bounds=None):
         else:
             stack = [torch.einsum('ijk,aj->iak', (t.cores[n], t.Us[n]))]
         idx = torch.zeros([t.shape[n]])
-        for o in range(1, max_order+1):
+        for o in range(1, max_order + 1):
             stack.append(diff(stack[-1], n))
-            idx = torch.cat((idx, torch.ones(stack[-1].shape[-2])*o))
+            idx = torch.cat((idx, torch.ones(stack[-1].shape[-2]) * o))
             if o == max_order:
                 break
         cores.append(torch.cat(stack, dim=-2))
@@ -61,7 +62,7 @@ def partialset(t, order=1, mask=None, bounds=None):
     return result
 
 
-def partial(t, dim, order=1, bounds=None, periodic=False, pad='top'):
+def partial(t, dim, order=1, bounds=None, periodic=False):
     """
     Compute a single partial derivative.
 
@@ -70,7 +71,6 @@ def partial(t, dim, order=1, bounds=None, periodic=False, pad='top'):
     :param order: how many times to derive. Default is 1
     :param bounds: variable(s) range bounds (to compute the derivative step). If None (default), step 1 will be assumed
     :param periodic: int or list of ints (same as `dim`), mark dimensions with periodicity
-    :param pad: string or list of strings indicating dimension zero-padding after differentiation. If 'top' (default) or 'bottom', the tensor will retain the same shape after the derivative. If 'none' it will lose one slice
 
     :return: a :class:`Tensor`
     """
@@ -78,41 +78,34 @@ def partial(t, dim, order=1, bounds=None, periodic=False, pad='top'):
     if not hasattr(dim, '__len__'):
         dim = [dim]
     if bounds is None:
-        bounds = [[0, t.shape[n]-1] for n in range(t.dim())]
+        bounds = [[0, t.shape[n]] for n in range(t.dim())]
     if not hasattr(bounds[0], '__len__'):
         bounds = [bounds]
     if not hasattr(periodic, '__len__'):
         periodic = [periodic]*len(dim)
-    if not isinstance(pad, list):
-        pad = [pad]*len(dim)
 
     t2 = t.clone()
     for i, d in enumerate(dim):
+        step = (bounds[i][1] - bounds[i][0]) / (t.shape[d]+1) * 2
         for o in range(1, order+1):
             if periodic[i]:
-                step = (bounds[i][1] - bounds[i][0]) / t.shape[d]
                 if t2.Us[d] is None:
-                    t2.cores[d] = (t2.cores[d][:, list(range(1, t2.cores[d].shape[1]))+[0], :] - t2.cores[d])
+                    t2.cores[d] = (t2.cores[d][:, list(range(1, t2.cores[d].shape[1]))+[0], :] -
+                                   t2.cores[d][:, [-1]+list(range(0, t2.cores[d].shape[1]-1)), :]) / step
                 else:
-                    t2.Us[d] = (t2.Us[d][list(range(1, t2.Us[d].shape[0]))+[0], :] - t2.Us[d]) / step
+                    t2.Us[d] = (t2.Us[d][list(range(1, t2.Us[d].shape[0])) + [0], :] -
+                                   t2.Us[d][[-1] + list(range(0, t2.Us[d].shape[0] - 1)), :]) / step
             else:
-                step = (bounds[i][1] - bounds[i][0]) / (t.shape[d]-1)
                 if t2.Us[d] is None:
-                    t2.cores[d] = (t2.cores[d][..., 1:, :] - t2.cores[d][..., :-1, :]) / step
-                    if t2.cores[d].dim() == 3:
-                        pad_slice = torch.zeros(t2.cores[d].shape[0], 1, t2.cores[d].shape[2])
-                    else:
-                        pad_slice = torch.zeros(1, t2.cores[d].shape[1])
-                    if pad[i] == 'top':
-                        t2.cores[d] = torch.cat((t2.cores[d], pad_slice), dim=-2)
-                    if pad[i] == 'bottom':
-                        t2.cores[d] = torch.cat((pad_slice, t2.cores[d]), dim=-2)
+                    t2.cores[d] = t2.cores[d][:, [0]+list(range(t2.shape[d]))+[t2.shape[d]-1], :]
+                    t2.cores[d][:, 0, :] -= t2.cores[d][:, 2, :] - t2.cores[d][:, 1, :]
+                    t2.cores[d][:, -1, :] += t2.cores[d][:, -2, :] - t2.cores[d][:, -3, :]
+                    t2.cores[d] = (t2.cores[d][:, 2:, :] - t2.cores[d][:, :-2, :])/step
                 else:
-                    t2.Us[d] = (t2.Us[d][1:, :] - t2.Us[d][:-1, :]) / step
-                    if pad[i] == 'top':
-                        t2.Us[d] = torch.cat((t2.Us[d], torch.zeros(1, t2.cores[d].shape[-2])), dim=0)
-                    if pad[i] == 'bottom':
-                        t2.Us[d] = torch.cat((torch.zeros(1, t2.cores[d].shape[-2]), t2.Us[d]), dim=0)
+                    t2.Us[d] = t2.Us[d][[0] + list(range(t2.shape[d])) + [t2.shape[d] - 1], :]
+                    t2.Us[d][0, :] -= t2.Us[d][2, :] - t2.Us[d][1, :]
+                    t2.Us[d][-1, :] += t2.Us[d][-2, :] - t2.Us[d][-3, :]
+                    t2.Us[d] = (t2.Us[d][2:, :] - t2.Us[d][:-2, :]) / step
     return t2
 
 
@@ -127,20 +120,23 @@ def gradient(t, dim='all', bounds=None):
     :return: a :class:`Tensor` (or a list thereof)
     """
 
+    if t.batch:
+        raise ValueError('Batched tensors are not supproted.')
+
     if dim == 'all':
         dim = range(t.dim())
     if bounds is None:
-        bounds = [[0, t.shape[d]-1] for d in dim]
+        bounds = [[0, t.shape[d]] for d in dim]
     if not hasattr(bounds, '__len__'):
         bounds = [bounds]*len(dim)
 
     if not hasattr(dim, '__len__'):
-        return partial(t, dim, bounds)
+        return tn.partial(t, dim, bounds)
     else:
-        return [partial(t, d, order=1, bounds=b) for d, b in zip(dim, bounds)]
+        return [tn.partial(t, d, order=1, bounds=b) for d, b in zip(dim, bounds)]
 
 
-def active_subspace(t):
+def active_subspace(t, bounds, marginals=None):
     """
     Compute the main variational directions of a tensor.
 
@@ -149,22 +145,74 @@ def active_subspace(t):
     See also P. Constantine's `data set repository <https://github.com/paulcon/as-data-sets/blob/master/README.md>`_.
 
     :param t: input tensor
+    :param bounds: a pair (or list of pairs) of reals, or None. The bounds for each variable
+    :param marginals: a list of vectors. If None (default), uniform marginals will be used
     :return: (eigvals, eigvecs): an array and a matrix, encoding the eigenpairs in descending order
     """
 
-    grad = tn.gradient(t, dim='all')
+    if t.batch:
+        raise ValueError('Batched tensors are not supproted.')
+
+    if marginals is None:
+        marginals = [torch.ones(sh)/sh for sh in t.shape]
+    assert all([len(marginals[n]) == t.shape[n] for n in range(t.dim())])
+    cores = []
+    for n in range(t.dim()):
+        marg = (marginals[n][:-1] + marginals[n][1:]) / 2
+        marg /= marg.sum()
+        marg = torch.cat([marg, torch.zeros(1)])
+        cores.append(marg[None, :, None])
+    pdf = tn.Tensor(cores)
+
+    grad = tn.gradient(t, dim='all', bounds=bounds)
 
     M = torch.zeros(t.dim(), t.dim())
     for i in range(t.dim()):
+        first = grad[i]*pdf
         for j in range(i, t.dim()):
-            M[i, j] = tn.dot(grad[i], grad[j]) / t.size
+            M[i, j] = tn.dot(first, grad[j])
             M[j, i] = M[i, j]
 
-    w, v = torch.symeig(M, eigenvectors=True)
-    idx = range(t.dim()-1, -1, -1)
+    w, v = torch.linalg.eigh(M)
+    idx = range(t.dim() - 1, -1, -1)
     w = w[idx]
     v = v[:, idx]
     return w, v
+
+
+def dgsm(t, bounds, marginals):
+    """
+    Compute the derivative-based global sensitivity measure \nu from [1], defined for each i-th variable as:
+
+    $\nu_i := \int_{\Omega} \left(\frac{\partial f}{\partial x_i}\right) \, d\pmb{x}$
+
+    [1] "Derivative-Based Global Sensitivity Measures", by Kucherenko and Iooss (2016)
+
+    :param t: input tensor
+    :param bounds: a pair (or list of pairs) of reals, or None. The bounds for each variable
+    :param marginals: a list of vectors. If None (default), uniform marginals will be used
+    :return: a vector of size N
+    """
+
+
+    if marginals is None:
+        marginals = [torch.ones(sh)/sh for sh in t.shape]
+    assert all([len(marginals[n]) == t.shape[n] for n in range(t.dim())])
+    cores = []
+    for n in range(t.dim()):
+        # marg = (marginals[n][:-1] + marginals[n][1:]) / 2
+        marg = marginals[n]
+        marg /= marg.sum()
+        # marg = torch.cat([marg, torch.zeros(1)])
+        cores.append(marg[None, :, None])
+    pdf = tn.Tensor(cores)
+
+    grad = tn.gradient(t, dim='all', bounds=bounds)
+
+    result = torch.zeros(t.dim())
+    for n in range(t.dim()):
+        result[n] = tn.dot(grad[n]*pdf, grad[n])
+    return result
 
 
 def divergence(ts, bounds=None):

@@ -4,9 +4,11 @@ from .automata import *
 from .create import *
 from .cross import *
 from .derivatives import *
+from .interpolation import *
 from .logic import *
 from .metrics import *
 from .ops import *
 from .round import *
 from .tensor import *
 from .tools import *
+from .tt_matrix import *

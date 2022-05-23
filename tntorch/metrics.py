@@ -14,8 +14,12 @@ def _process(gt, approx):
     if is1 and is2:
         return gt, approx
     if is1:
+        if gt.batch:
+            raise ValueError('Batched tensors are not supproted.')
         gt = gt.torch()
     if is2:
+        if approx.batch:
+            raise ValueError('Batched tensors are not supproted.')
         approx = approx.torch()
     return gt, approx
 
@@ -182,45 +186,68 @@ def sum(t, dim=None, keepdim=False, _normalize=False):
 
     :return: a scalar (if keepdim is False and all dims were chosen) or :class:`Tensor` otherwise
     """
+    if t.batch:
+        raise ValueError('Batched tensors are not supproted.')
 
     if dim is None:
         dim = np.arange(t.dim())
+
     if not hasattr(dim, '__len__'):
         dim = [dim]
+
     device = t.cores[0].device
+
     if _normalize:
         us = [(1./t.shape[d])*torch.ones(t.shape[d]).to(device) for d in dim]
     else:
         us = [torch.ones(t.shape[d]).to(device) for d in dim]
+
     result = tn.ttm(t, us, dim)
     if keepdim:
         return result
     else:
-        return tn.squeeze(result, dim)
+        return tn.squeeze(result)
 
 
-def mean(t, dim=None, keepdim=False):
+def mean(t, dim=None, marginals=None, keepdim=False):
     """
     Computes the mean of a :class:`Tensor` along all or some of its dimensions.
 
     :param t: a :class:`Tensor`
     :param dim: an int or list of ints (default: all)
+    :param marginals: an optional list of vectors
     :param keepdim: whether to keep the same number of dimensions
 
-    :return: a scalar
+    :return: a scalar (if keepdim is False and all dims were chosen) or :class:`Tensor` otherwise
     """
+
+    if marginals is not None:
+        pdfcores = [torch.ones(sh)/sh for sh in t.shape]
+        if dim is None:
+            dim = range(t.dim())
+        for d, marg in zip(dim, marginals):
+            pdfcores[d] = marg[None, :, None] / marg.sum()
+        pdf = tn.Tensor(pdfcores)
+        return tn.sum(t*pdf, dim, keepdim)
 
     return tn.sum(t, dim, keepdim, _normalize=True)
 
 
-def var(t):
+def var(t, marginals=None):
     """
     Computes the variance of a :class:`Tensor`.
 
     :param t: a :class:`Tensor`
+    :param marginals: an optional list of vectors
 
     :return: a scalar :math:`\ge 0`
     """
+
+    if marginals is not None:
+        assert len(marginals) == t.dim()
+        tcentered = t - tn.mean(t, marginals=marginals)
+        pdf = tn.Tensor([marg[None, :, None] / marg.sum() for marg in marginals])
+        return tn.dot(tcentered*pdf, tcentered)
 
     return tn.normsq(t-tn.mean(t)) / t.numel()
 
@@ -246,7 +273,7 @@ def skew(t):
     :return: a scalar
     """
 
-    return tn.mean(((t-tn.mean(t))/tn.std(t))**3)
+    return tn.mean(((t - tn.mean(t)) / tn.std(t))**3)
 
 
 def kurtosis(t, fisher=True):
@@ -259,7 +286,112 @@ def kurtosis(t, fisher=True):
     :return: a scalar
     """
 
-    return tn.mean(((t-tn.mean(t))/tn.std(t))**4) - fisher*3
+    return tn.mean(((t - tn.mean(t)) / tn.std(t))**4) - fisher * 3
+
+
+def raw_moment(t, k, marginals=None, eps=1e-6, algorithm='eig'):
+    """
+    Compute a raw moment :math:`\\mathbb{E}[t^k]'.
+
+    :param t: input :class:`Tensor`
+    :param k: the desired moment order (integer :math:`\ge 1`)
+    :param marginals: an optional list of vectors
+    :param eps: relative error for rounding (default is 1e-6)
+
+    :return: the :math:`k`-th order raw moment of `t`
+    """
+
+    if marginals is not None:
+        pdf = tn.Tensor([marg[None, :, None]/marg.sum() for marg in marginals])
+        return hadamard_sum([t]*(k-1) + [t*pdf], eps=eps, algorithm=algorithm)
+
+    return hadamard_sum([t]*k, eps=eps, algorithm=algorithm) / t.numel()
+
+
+def normalized_moment(t, k, marginals=None, eps=1e-12, algorithm='eig'):
+    """
+    Compute a normalized central moment :math:`\\mathbb{E}[(t - \\mathbb{E}[t])^k] / \\sigma^k'.
+
+    :param t: input :class:`Tensor`
+    :param k: the desired moment order (integer :math:`\ge 1`)
+    :param marginals: an optional list of vectors
+    :param eps: relative error for rounding (default is 1e-12)
+
+    :return: the :math:`k`-th order normalized moment of `t`
+    """
+
+    return raw_moment(t-tn.mean(t, marginals=marginals), k=k, marginals=marginals, eps=eps, algorithm=algorithm) / tn.var(t, marginals=marginals)**(k/2.)# / t.numel()
+
+
+def hadamard_sum(ts, eps=1e-6, algorithm='eig'):
+    """
+    Given tensors :math:`t_1, \\dots, t_M`, computes :math:'\\Sum (t_1 \\circ \\dots \\circ t_M)'.
+
+    Reference: this is a variant of A. Novikov et al., "Putting MRFs on a Tensor Train" (2016), Alg. 1
+
+    :param ts: a list of :class:`Tensor` (the algorithm will use temporary TT-format copies of those)
+    :param eps: relative error used at each rounding step (default is 1e-6)
+    :param algorithm: 'eig' (default) or 'svd'
+
+    :return: a scalar
+    """
+
+    def diag_core(c, m):
+        """
+        Takes a TT core of shape Rl x I x Rr and organizes it as a tensor of shape I x Rl x Rr x I
+        """
+
+        factor = c.permute(0, 2, 1)
+        factor = torch.reshape(factor, [-1, factor.shape[-1]])
+        core = torch.zeros(factor.shape[1], factor.shape[1] + 1, factor.shape[0])
+        core[:, 0, :] = factor.t()
+        core = core.reshape(factor.shape[1] + 1, factor.shape[1], factor.shape[0]).permute(0, 2, 1)[:-1, :, :]
+        core = core.reshape([c.shape[1], c.shape[0], c.shape[2], c.shape[1]])
+        if m == 0:
+            core = torch.sum(core, dim=0, keepdim=True)
+        if m == M-1:
+            core = torch.sum(core, dim=-1, keepdim=True)
+        return core
+
+    def get_tensor(cores):
+        M = len(cores)
+        cs = []
+        for m in range(M):
+            c = diag_core(cores[m], m)
+            cs.append(c.reshape(c.shape[0], c.shape[1]*c.shape[2], c.shape[3]))
+        t = tn.Tensor(cs)
+        t.round_tt(eps, algorithm=algorithm)
+        cs = t.cores
+        cs = [cs[m].reshape([cs[m].shape[0], cores[m].shape[0], cores[m].shape[2], cs[m].shape[-1]]) for m in range(M)]
+        return cs
+
+    M = len(ts)
+    tstt = []
+    for m in range(M):  # Convert everything to the TT format
+        if ts[m].batch:
+            raise ValueError('Batched tensors are not supproted.')
+
+        t = ts[m].decompress_tucker_factors()
+        t._cp_to_tt()
+        tstt.append(t)
+    ts = tstt
+    N = ts[0].dim()
+    thiscores = get_tensor([t.cores[0] for t in ts])
+
+    for n in range(1, N):
+        nextcores = get_tensor([t.cores[n] for t in ts])
+        newcores = []
+        for m in range(M):
+            c = torch.einsum('ijkl,akbc->iajblc', (thiscores[m], nextcores[m]))  # vecmat product
+            c = torch.reshape(c, [c.shape[0] * c.shape[1] * c.shape[2], c.shape[3], c.shape[4] * c.shape[5]])
+            newcores.append(c)
+        thiscores = tn.round_tt(tn.Tensor(newcores), eps=eps, algorithm=algorithm).cores
+
+        if n < N-1:
+            for m in range(M):  # Cast the vector as a TT-matrix for the next iteration
+                thiscores[m] = thiscores[m].reshape(thiscores[m].shape[0], 1, thiscores[m].shape[1], -1)
+        else:
+            return tn.Tensor(thiscores).torch().item()
 
 
 def normsq(t):
